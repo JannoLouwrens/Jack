@@ -23,7 +23,14 @@ from jack.server.auth import (
     InvalidTokenError, InvalidAPIKeyError, RateLimitExceededError,
 )
 
+# Import core verifier for safety checks
+from jack.core.verifier import Verifier
+
 logger = logging.getLogger(__name__)
+
+# Deep logging buffer for tracing agent decisions
+_deep_log_buffer: list = []
+_max_log_entries = 500
 
 
 # =============================================================================
@@ -85,6 +92,24 @@ class APIKeyResponse(BaseModel):
     message: str = "Save this key - it cannot be recovered!"
 
 
+class ExecuteRequest(BaseModel):
+    """Request to execute a primitive action directly."""
+    action: str = Field(..., description="Action type: shell, file_read, file_write, http")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Action parameters")
+    timeout: Optional[float] = Field(30.0, description="Timeout in seconds")
+
+
+class ExecuteResponse(BaseModel):
+    """Response from direct primitive execution."""
+    success: bool
+    outcome: str
+    output: Optional[Any] = None
+    error: Optional[str] = None
+    blocked: bool = False
+    block_reason: Optional[str] = None
+    duration_ms: float = 0.0
+
+
 # =============================================================================
 # Application State
 # =============================================================================
@@ -96,6 +121,8 @@ class AppState:
     auth: AuthManager
     agent: Any = None  # Jack Loop instance
     reasoner: Any = None  # LLM Reasoner
+    verified_executor: Any = None  # VerifiedExecutor for safe action execution
+    verifier: Any = None  # Core Verifier instance
     start_time: float = 0.0
 
     @property
@@ -241,16 +268,60 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
             logger.warning(f"Could not import LLM module: {e}")
             state.reasoner = None
 
+        # Initialize VerifiedExecutor (safe action execution)
+        try:
+            from jack.foundation.verified_executor import VerifiedExecutor, create_verified_executor
+            from jack.foundation.action import Executor
+
+            # Create verified executor with safety checks
+            state.verifier = Verifier()
+            state.verified_executor = create_verified_executor(
+                working_dir="/tmp/jack",  # Safe working directory
+            )
+            logger.info("VerifiedExecutor initialized with safety checks")
+
+        except ImportError as e:
+            logger.warning(f"Could not import VerifiedExecutor: {e}")
+            state.verified_executor = None
+            state.verifier = Verifier()  # Still have verifier for manual checks
+
         # Initialize Jack Loop (agent)
         try:
-            from jack.foundation import Loop
+            from jack.foundation.loop import Loop, LoopEventData
 
             if state.reasoner:
-                state.agent = Loop(reasoner=state.reasoner)
-                logger.info("Jack Loop initialized with LLM reasoner")
+                # Pass verified executor to the Loop
+                if state.verified_executor:
+                    state.agent = Loop(
+                        reasoner=state.reasoner,
+                        executor=state.verified_executor,
+                    )
+                    logger.info("Jack Loop initialized with LLM reasoner and VerifiedExecutor")
+                else:
+                    state.agent = Loop(reasoner=state.reasoner)
+                    logger.info("Jack Loop initialized with LLM reasoner (no executor)")
             else:
                 state.agent = Loop()
                 logger.info("Jack Loop initialized with default reasoner")
+
+            # Add deep logging event listener
+            def deep_log_event(event: LoopEventData):
+                import time
+                global _deep_log_buffer, _max_log_entries
+                entry = {
+                    "timestamp": time.time(),
+                    "phase": event.phase.name,
+                    "event": event.event.name,
+                    "data": str(event.data)[:1000],  # Truncate large data
+                }
+                _deep_log_buffer.append(entry)
+                if len(_deep_log_buffer) > _max_log_entries:
+                    _deep_log_buffer = _deep_log_buffer[-_max_log_entries:]
+                logger.info(f"[TRACE] [{event.phase.name}] {event.event.name}: {str(event.data)[:200]}")
+
+            if state.agent:
+                state.agent.add_listener(deep_log_event)
+                logger.info("Deep logging event listener attached to Loop")
 
         except ImportError as e:
             logger.warning(f"Could not import Jack Foundation: {e}")
@@ -397,34 +468,66 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
         """
         Query the Jack agent.
 
-        This runs the full agent loop: perceive → plan → act → verify.
+        This runs the full agent loop: perceive → reason → verify → act → observe.
+        Actions are filtered through the Verifier for safety.
         """
         if not state.agent:
             raise HTTPException(503, "Agent not initialized")
 
         if request.stream:
-            # For streaming, redirect to stream endpoint
             raise HTTPException(400, "Use /agent/stream for streaming responses")
 
         try:
-            # Run agent loop
-            # TODO: Implement proper agent query interface
-            if state.reasoner:
-                result = await state.reasoner.reason(request.query)
-                if result.is_ok():
-                    return AgentResponse(
-                        response=result.unwrap(),
-                        confidence=0.9,
-                    )
-                else:
-                    return AgentResponse(
-                        response=f"Error: {result.unwrap_err()}",
-                        confidence=0.0,
-                    )
-            else:
+            from jack.foundation.state import Goal, GoalType
+
+            # Create goal from query
+            goal = Goal(
+                intent=request.query,
+                goal_type=GoalType.QUERY,
+                success_criteria=("provides_answer",),
+                metadata=request.context or {},
+            )
+
+            # Run the full agent loop (synchronously in thread pool)
+            def run_loop():
+                return state.agent.run(goal)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, run_loop)
+
+            if result.is_ok():
+                action_results = result.unwrap()
+                # Collect action info
+                actions_taken = []
+                for ar in action_results:
+                    actions_taken.append({
+                        "type": ar.primitive.primitive_type.name,
+                        "outcome": ar.outcome.name,
+                        "output": str(ar.output)[:500] if ar.output else None,
+                    })
+
+                # Get final response from last successful action or reasoning
+                final_output = ""
+                for ar in reversed(action_results):
+                    if ar.is_success and ar.output:
+                        if isinstance(ar.output, dict):
+                            final_output = ar.output.get("stdout", "") or ar.output.get("content", "") or str(ar.output)
+                        else:
+                            final_output = str(ar.output)
+                        break
+
                 return AgentResponse(
-                    response="Agent reasoning not available",
+                    response=final_output or "Goal completed",
+                    reasoning=state.agent.state.reasoning_trace if hasattr(state.agent.state, 'reasoning_trace') else None,
+                    confidence=0.9,
+                    actions_taken=actions_taken,
+                )
+            else:
+                error = result.unwrap_err()
+                return AgentResponse(
+                    response=f"Agent failed: {error.message}",
                     confidence=0.0,
+                    actions_taken=[],
                 )
 
         except Exception as e:
@@ -504,6 +607,103 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(500, f"JSON reasoning error: {str(e)}")
 
+    @app.post("/agent/execute", response_model=ExecuteResponse, tags=["Agent"])
+    async def execute_primitive(
+        request: ExecuteRequest,
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_auth),
+    ) -> ExecuteResponse:
+        """
+        Execute a primitive action directly (with safety verification).
+
+        Supported actions:
+        - shell: {"command": "ls -la"}
+        - file_read: {"path": "/tmp/file.txt"}
+        - file_write: {"path": "/tmp/file.txt", "content": "hello"}
+        - http: {"method": "GET", "url": "https://api.example.com"}
+
+        All actions pass through the Verifier - dangerous commands are BLOCKED.
+        """
+        if not state.verified_executor:
+            raise HTTPException(503, "Executor not initialized")
+
+        try:
+            from jack.foundation.plan import Primitive, PrimitiveType
+            from jack.foundation.action import OutcomeType
+
+            # Map action string to primitive
+            action_map = {
+                "shell": lambda p: Primitive.shell(
+                    p.get("command", ""),
+                    timeout=request.timeout or 30.0
+                ),
+                "file_read": lambda p: Primitive.read_file(p.get("path", "")),
+                "file_write": lambda p: Primitive.write_file(
+                    p.get("path", ""),
+                    p.get("content", "")
+                ),
+                "http": lambda p: Primitive.http(
+                    p.get("method", "GET"),
+                    p.get("url", ""),
+                    body=p.get("body"),
+                    headers=p.get("headers", {})
+                ),
+            }
+
+            if request.action not in action_map:
+                raise HTTPException(400, f"Unknown action: {request.action}. Use: {list(action_map.keys())}")
+
+            # Create primitive
+            primitive = action_map[request.action](request.params)
+
+            # Execute through verified executor (runs in thread pool)
+            def run_execute():
+                return state.verified_executor.execute(primitive)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, run_execute)
+
+            # Build response
+            if result.outcome == OutcomeType.BLOCKED:
+                return ExecuteResponse(
+                    success=False,
+                    outcome="BLOCKED",
+                    blocked=True,
+                    block_reason=result.error.message if result.error else "Blocked by verifier",
+                    duration_ms=result.duration_ms,
+                )
+            elif result.is_success:
+                return ExecuteResponse(
+                    success=True,
+                    outcome="SUCCESS",
+                    output=result.output,
+                    duration_ms=result.duration_ms,
+                )
+            else:
+                return ExecuteResponse(
+                    success=False,
+                    outcome=result.outcome.name,
+                    error=result.error.message if result.error else "Unknown error",
+                    duration_ms=result.duration_ms,
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Execute primitive failed")
+            raise HTTPException(500, f"Execution error: {str(e)}")
+
+    @app.get("/agent/executor/stats", tags=["Agent"])
+    async def get_executor_stats(
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_auth),
+    ) -> Dict[str, Any]:
+        """Get verified executor statistics (blocked/allowed counts)."""
+        if not state.verified_executor:
+            return {"error": "Executor not initialized"}
+
+        return state.verified_executor.get_stats()
+
     # ==========================================================================
     # LLM Management Routes
     # ==========================================================================
@@ -538,6 +738,72 @@ def create_app(config: Optional[ServerConfig] = None) -> FastAPI:
                 return {"success": False, "error": str(result.unwrap_err())}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ==========================================================================
+    # Observability Routes (Deep Logging)
+    # ==========================================================================
+
+    @app.get("/agent/traces", tags=["Observability"])
+    async def get_traces(
+        limit: int = 50,
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_auth),
+    ) -> Dict[str, Any]:
+        """
+        Get recent agent decision traces.
+
+        Returns the deep log buffer with phase/event/data for each step.
+        """
+        global _deep_log_buffer
+        traces = _deep_log_buffer[-limit:] if limit < len(_deep_log_buffer) else _deep_log_buffer
+        return {
+            "total_traces": len(_deep_log_buffer),
+            "returned": len(traces),
+            "traces": traces,
+        }
+
+    @app.delete("/agent/traces", tags=["Observability"])
+    async def clear_traces(
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_admin),
+    ) -> Dict[str, bool]:
+        """Clear the trace buffer (admin only)."""
+        global _deep_log_buffer
+        _deep_log_buffer = []
+        return {"cleared": True}
+
+    @app.get("/agent/metrics", tags=["Observability"])
+    async def get_agent_metrics(
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_auth),
+    ) -> Dict[str, Any]:
+        """
+        Get agent observability metrics.
+
+        Returns metrics from the ObservabilityLayer if available.
+        """
+        if not state.agent:
+            return {"error": "Agent not initialized"}
+
+        # Get observability metrics from the Loop
+        if hasattr(state.agent, 'observability') and state.agent.observability:
+            return state.agent.observability.get_metrics()
+        else:
+            return {"message": "Observability layer not enabled"}
+
+    @app.get("/agent/stats", tags=["Observability"])
+    async def get_agent_stats(
+        state: AppState = Depends(get_state),
+        auth: Dict[str, Any] = Depends(verify_auth),
+    ) -> Dict[str, Any]:
+        """Get comprehensive agent statistics."""
+        if not state.agent:
+            return {"error": "Agent not initialized"}
+
+        if hasattr(state.agent, 'get_stats'):
+            return state.agent.get_stats()
+        else:
+            return {"message": "Stats not available"}
 
     return app
 

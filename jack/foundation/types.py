@@ -118,7 +118,7 @@ class ResultBase(ABC, Generic[T, E]):
         ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)  # removed slots=True for Python 3.9 compatibility
 class Ok(ResultBase[T, E]):
     """
     Success variant of Result.
@@ -170,7 +170,7 @@ class Ok(ResultBase[T, E]):
         return True
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)  # removed slots=True for Python 3.9 compatibility
 class Err(ResultBase[T, E]):
     """
     Error variant of Result.
@@ -293,7 +293,7 @@ class OptionBase(ABC, Generic[T]):
         ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)  # removed slots=True for Python 3.9 compatibility
 class Some(OptionBase[T]):
     """
     Some variant of Option - contains a value.
