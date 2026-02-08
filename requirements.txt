@@ -1,0 +1,43 @@
+# Core
+torch>=2.0.0
+numpy>=1.24.0
+
+# System interaction
+psutil>=5.9.0
+requests>=2.28.0
+
+# Memory / Database
+chromadb>=0.4.0
+
+# Training
+docker>=6.0.0
+gymnasium>=0.29.0
+
+# CLI
+rich>=13.0.0
+typer>=0.9.0
+
+# LLM APIs (for code generation loop)
+anthropic>=0.18.0
+openai>=1.0.0
+
+# Server (Jack Server API)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+starlette>=0.27.0
+httpx>=0.25.0
+aiohttp>=3.9.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Database (optional - MSSQL)
+pyodbc>=5.0.0
+
+# Vision / GUI automation
+mss>=9.0.0          # Fast screenshots
+Pillow>=10.0.0      # Image processing
+pyautogui>=0.9.54   # Mouse/keyboard control
+
+# Optional: Local LLM
+# ollama>=0.1.0

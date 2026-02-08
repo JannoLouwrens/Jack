@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jack-agent"
+version = "0.1.0"
+description = "Universal AI Agent - Learn digital physics like robots learn physical physics"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Janno Louwrens", email = "janno@example.com"}
+]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Systems Administration",
+]
+keywords = [
+    "ai", "agent", "automation", "machine-learning",
+    "world-model", "reinforcement-learning"
+]
+
+dependencies = [
+    "psutil>=5.9.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+]
+cli = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+]
+full = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "chromadb>=0.4.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+jack = "jack.interfaces.cli:run_cli"
+
+[project.urls]
+Homepage = "https://github.com/jannolouwrens/jack"
+Documentation = "https://github.com/jannolouwrens/jack#readme"
+Repository = "https://github.com/jannolouwrens/jack"
+Issues = "https://github.com/jannolouwrens/jack/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jack*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]  # Line length handled by black
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "jack/foundation/tests"]
+python_files = ["test_*.py"]
+addopts = "-v"

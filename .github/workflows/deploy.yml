@@ -1,0 +1,61 @@
+name: Deploy to Oracle Ampere
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Oracle Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            echo "=== Starting deployment ==="
+            cd /opt/jack
+
+            # Pull latest code from GitHub
+            if [ -d ".git" ]; then
+              echo "Pulling latest changes..."
+              git pull origin main || git pull origin master
+            else
+              echo "Cloning repository..."
+              cd /opt
+              rm -rf jack
+              git clone ${{ secrets.REPO_URL }} jack
+              cd jack
+            fi
+
+            # Fix Python 3.9 compatibility (remove slots=True)
+            find . -name "*.py" -exec sed -i 's/, slots=True//g' {} \;
+            find . -name "*.py" -exec sed -i 's/slots=True, //g' {} \;
+
+            # Restart the server
+            echo "Restarting Jack server..."
+            sudo systemctl restart jack-server
+
+            # Wait and check status
+            sleep 3
+            sudo systemctl status jack-server --no-pager | head -10
+
+            echo "=== Deployment complete ==="
+
+      - name: Health Check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            curl -s http://localhost:8000/health | python3 -m json.tool
