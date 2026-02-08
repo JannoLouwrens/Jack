@@ -1088,7 +1088,11 @@ class Loop:
         self.verifier = verifier or Verifier(self.reasoner)
 
         # Perception (LLM-first with SOTA patterns)
-        self.perception_engine = perception_engine or create_perception_engine()
+        # Pass the reasoner so perception engine uses the same LLM
+        self.perception_engine = perception_engine or create_perception_engine(
+            reasoner=self.reasoner,
+            memory=self.memory,
+        )
 
         # SOTA: Perception-Action Feedback (learns from action outcomes)
         self.perception_feedback = PerceptionActionFeedback()
@@ -1097,7 +1101,11 @@ class Loop:
         self.perception_calibrator = PerceptionCalibrator()
 
         # Retrieval (Agentic RAG)
-        self.retrieval_engine = retrieval_engine or create_retrieval_engine()
+        # Pass the reasoner so retrieval engine uses the same LLM
+        self.retrieval_engine = retrieval_engine or create_retrieval_engine(
+            reasoner=self.reasoner,
+            memory=self.memory,
+        )
 
         # Robust infrastructure
         self.robust_reasoner = robust_reasoner
